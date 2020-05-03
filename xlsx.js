@@ -2639,7 +2639,7 @@ function read_binary(path) {
 	throw new Error("Cannot access file " + path);
 }
 function keys(o) {
-	var ks = Object.keys(o), o2 = [];
+	var ks = o ? Object.keys(o) : [], o2 = [];
 	for(var i = 0; i < ks.length; ++i) if(Object.prototype.hasOwnProperty.call(o, ks[i])) o2.push(ks[i]);
 	return o2;
 }
@@ -4629,9 +4629,11 @@ var RELS_ROOT = writextag('Relationships', null, {
 
 /* TODO */
 function write_rels(rels) {
-	var o = [XML_HEADER, RELS_ROOT];
-	keys(rels['!id']).forEach(function(rid) {
-		o[o.length] = (writextag('Relationship', null, rels['!id'][rid]));
+	var o = [];
+	o[o.length] = (XML_HEADER);
+	o[o.length] = (RELS_ROOT);
+	keys(rels['!id']).forEach(function(rid) { var rel = rels['!id'][rid];
+		o[o.length] = (writextag('Relationship', null, rel));
 	});
 	if(o.length>2){ o[o.length] = ('</Relationships>'); o[1]=o[1].replace("/>",">"); }
 	return o.join("");
@@ -8756,7 +8758,8 @@ function process_col(coll) {
 }
 
 var DEF_PPI = 96, PPI = DEF_PPI;
-function px2pt(px) { return px * 96 / PPI; }
+function px2pt(px) { return px * 72 / 96; }
+//function px2pt(px) { return px * 96 / PPI; }
 function pt2px(pt) { return pt * PPI / 96; }
 
 /* [MS-EXSPXML3] 2.4.54 ST_enmPattern */
@@ -20570,134 +20573,285 @@ if(einfo[0] == 0x02 && typeof decrypt_std76 !== 'undefined') return decrypt_std7
 	throw new Error("File is password-protected");
 }
 
+RELS.IMG = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image";
+RELS.DRAW = "http://schemas.openxmlformats.org/officeDocument/2006/relationships/drawing";
+
 function write_zip(wb, opts) {
-	_shapeid = 1024;
-	if(opts.bookType == "ods") return write_ods(wb, opts);
 	if(wb && !wb.SSF) {
 		wb.SSF = SSF.get_table();
 	}
 	if(wb && wb.SSF) {
 		make_ssf(SSF); SSF.load_table(wb.SSF);
-		// $FlowIgnore
 		opts.revssf = evert_num(wb.SSF); opts.revssf[wb.SSF[65535]] = 0;
-		opts.ssf = wb.SSF;
 	}
 	opts.rels = {}; opts.wbrels = {};
 	opts.Strings = []; opts.Strings.Count = 0; opts.Strings.Unique = 0;
-	if(browser_has_Map) opts.revStrings = new Map();
-	else { opts.revStrings = {}; opts.revStrings.foo = []; delete opts.revStrings.foo; }
 	var wbext = opts.bookType == "xlsb" ? "bin" : "xml";
-	var vbafmt = VBAFMTS.indexOf(opts.bookType) > -1;
-	var ct = new_ct();
+	var ct = { workbooks: [], sheets: [], calcchains: [], themes: [], styles: [],
+		coreprops: [], extprops: [], custprops: [], strs:[], comments: [], vba: [],
+		TODO:[], rels:[], xmlns: "" };
 	fix_write_opts(opts = opts || {});
-var zip = zip_new();
+	var zip = new jszip();
 	var f = "", rId = 0;
 
 	opts.cellXfs = [];
 	get_cell_style(opts.cellXfs, {}, {revssf:{"General":0}});
 
-	if(!wb.Props) wb.Props = {};
-
 	f = "docProps/core.xml";
-	zip_add_file(zip, f, write_core_props(wb.Props, opts));
+	zip.file(f, write_core_props(wb.Props, opts));
 	ct.coreprops.push(f);
 	add_rels(opts.rels, 2, f, RELS.CORE_PROPS);
 
-f = "docProps/app.xml";
-	if(wb.Props && wb.Props.SheetNames){/* empty */}
-	else if(!wb.Workbook || !wb.Workbook.Sheets) wb.Props.SheetNames = wb.SheetNames;
-	else {
-		var _sn = [];
-		for(var _i = 0; _i < wb.SheetNames.length; ++_i)
-			if((wb.Workbook.Sheets[_i]||{}).Hidden != 2) _sn.push(wb.SheetNames[_i]);
-		wb.Props.SheetNames = _sn;
-	}
-	wb.Props.Worksheets = wb.Props.SheetNames.length;
-	zip_add_file(zip, f, write_ext_props(wb.Props, opts));
+	f = "docProps/app.xml";
+	if(!wb.Props) wb.Props = {};
+	wb.Props.SheetNames = wb.SheetNames;
+	wb.Props.Worksheets = wb.SheetNames.length;
+	zip.file(f, write_ext_props(wb.Props, opts));
 	ct.extprops.push(f);
 	add_rels(opts.rels, 3, f, RELS.EXT_PROPS);
 
 	if(wb.Custprops !== wb.Props && keys(wb.Custprops||{}).length > 0) {
 		f = "docProps/custom.xml";
-		zip_add_file(zip, f, write_cust_props(wb.Custprops, opts));
+		zip.file(f, write_cust_props(wb.Custprops, opts));
 		ct.custprops.push(f);
 		add_rels(opts.rels, 4, f, RELS.CUST_PROPS);
 	}
 
+	f = "xl/workbook." + wbext;
+	zip.file(f, write_wb(wb, f, opts));
+	ct.workbooks.push(f);
+	add_rels(opts.rels, 1, f, RELS.WB);
+
 	for(rId=1;rId <= wb.SheetNames.length; ++rId) {
-		var wsrels = {'!id':{}};
-		var ws = wb.Sheets[wb.SheetNames[rId-1]];
-		var _type = (ws || {})["!type"] || "sheet";
-		switch(_type) {
-		case "chart":
-			/* falls through */
-		default:
-			f = "xl/worksheets/sheet" + rId + "." + wbext;
-			zip_add_file(zip, f, write_ws(rId-1, f, opts, wb, wsrels));
-			ct.sheets.push(f);
-			add_rels(opts.wbrels, -1, "worksheets/sheet" + rId + "." + wbext, RELS.WS[0]);
+		var s = wb.SheetNames[rId-1], ws = wb.Sheets[s],
+		    images = ws['!images'] || [];
+		var rels = ws['!rels'] = [], draw_rels = [];
+		for (var sId=1; sId < images.length+1; ++sId) {
+			var image = images[sId - 1];
+			f = 'xl/media/' + image.name;
+			zip.file(f, image.data, image.opts);
+			add_rels(draw_rels, sId, "../media/" + image.name, RELS.IMG);
 		}
-
-		if(ws) {
-			var comments = ws['!comments'];
-			var need_vml = false;
-			if(comments && comments.length > 0) {
-				var cf = "xl/comments" + rId + "." + wbext;
-				zip_add_file(zip, cf, write_cmnt(comments, cf, opts));
-				ct.comments.push(cf);
-				add_rels(wsrels, -1, "../comments" + rId + "." + wbext, RELS.CMNT);
-				need_vml = true;
-			}
-			if(ws['!legacy']) {
-				if(need_vml) zip_add_file(zip, "xl/drawings/vmlDrawing" + (rId) + ".vml", write_comments_vml(rId, ws['!comments']));
-			}
-			delete ws['!comments'];
-			delete ws['!legacy'];
-		}
-
-		if(wsrels['!id'].rId1) zip_add_file(zip, get_rels_path(f), write_rels(wsrels));
+		zip.file("xl/drawings/drawing" + rId + "." + wbext, write_drawing(images));
+		add_rels(rels, rId, "../drawings/drawing" + rId + "." + wbext, RELS.DRAW);
+		zip.file("xl/drawings/_rels/drawing" + rId + "." + wbext + ".rels", write_rels(draw_rels));
+		zip.file("xl/worksheets/_rels/sheet" + rId + "." + wbext + '.rels', write_rels(rels));
+		f = "xl/worksheets/sheet" + rId + "." + wbext;
+		zip.file(f, write_ws(rId-1, f, opts, wb));
+		ct.sheets.push(f);
+		add_rels(opts.wbrels, rId, "worksheets/sheet" + rId + "." + wbext, RELS.WS);
 	}
 
 	if(opts.Strings != null && opts.Strings.length > 0) {
 		f = "xl/sharedStrings." + wbext;
-		zip_add_file(zip, f, write_sst(opts.Strings, f, opts));
+		zip.file(f, write_sst(opts.Strings, f, opts));
 		ct.strs.push(f);
-		add_rels(opts.wbrels, -1, "sharedStrings." + wbext, RELS.SST);
+		add_rels(opts.wbrels, ++rId, "sharedStrings." + wbext, RELS.SST);
 	}
-
-	f = "xl/workbook." + wbext;
-	zip_add_file(zip, f, write_wb(wb, f, opts));
-	ct.workbooks.push(f);
-	add_rels(opts.rels, 1, f, RELS.WB);
 
 	/* TODO: something more intelligent with themes */
 
 	f = "xl/theme/theme1.xml";
-	zip_add_file(zip, f, write_theme(wb.Themes, opts));
+	zip.file(f, write_theme());
 	ct.themes.push(f);
-	add_rels(opts.wbrels, -1, "theme/theme1.xml", RELS.THEME);
+	add_rels(opts.wbrels, ++rId, "theme/theme1.xml", RELS.THEME);
 
 	/* TODO: something more intelligent with styles */
 
 	f = "xl/styles." + wbext;
-	zip_add_file(zip, f, write_sty(wb, f, opts));
+	zip.file(f, write_sty(wb, f, opts));
 	ct.styles.push(f);
-	add_rels(opts.wbrels, -1, "styles." + wbext, RELS.STY);
+	add_rels(opts.wbrels, ++rId, "styles." + wbext, RELS.STY);
 
-	if(wb.vbaraw && vbafmt) {
-		f = "xl/vbaProject.bin";
-		zip_add_file(zip, f, wb.vbaraw);
-		ct.vba.push(f);
-		add_rels(opts.wbrels, -1, "vbaProject.bin", RELS.VBA);
-	}
-
-	zip_add_file(zip, "[Content_Types].xml", write_ct(ct, opts));
-	zip_add_file(zip, '_rels/.rels', write_rels(opts.rels));
-	zip_add_file(zip, 'xl/_rels/workbook.' + wbext + '.rels', write_rels(opts.wbrels));
-
-	delete opts.revssf; delete opts.ssf;
+	zip.file("[Content_Types].xml", write_ct(ct, opts));
+	zip.file('_rels/.rels', write_rels(opts.rels));
+	zip.file('xl/_rels/workbook.' + wbext + '.rels', write_rels(opts.wbrels));
 	return zip;
 }
+
+var DRAW_ROOT = writextag('xdr:wsDr', null, {
+	'xmlns:xdr': 'http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing',
+	'xmlns:a': 'http://schemas.openxmlformats.org/drawingml/2006/main'
+	//'xmlns:ns0': XMLNS.RELS,
+	// 'xmlns': XMLNS.RELS
+});
+
+function write_drawing(images) {
+	var o = [];
+	o[o.length] = (XML_HEADER);
+	o[o.length] = (DRAW_ROOT);
+
+	for (var i = 0; i < images.length; i++) {
+		var image = images[i];
+		var pos = image.position || {};
+		if (pos.type === 'twoCellAnchor') {
+			var from = pos.from || {}, to = pos.to || {},
+			    fromCol = from.col || 0, toCol = to.col || 0,
+			    fromRow = from.row || 0, toRow = to.row || 0;
+
+			var twoCell = '<xdr:from><xdr:col>'+fromCol+'</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>'+fromRow+'</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>';
+			twoCell += '<xdr:to><xdr:col>'+toCol+'</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>'+toRow+'</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>';
+			twoCell += '<xdr:pic><xdr:nvPicPr><xdr:cNvPr id="'+(i+1)+'" name="'+image.name+'">'
+			twoCell += '</xdr:cNvPr><xdr:cNvPicPr><a:picLocks noChangeAspect="1"/></xdr:cNvPicPr></xdr:nvPicPr>';
+			twoCell += '<xdr:blipFill><a:blip xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" r:embed="rId'+(i+1)+'"/>';
+			twoCell += '<a:stretch><a:fillRect/></a:stretch></xdr:blipFill><xdr:spPr><a:prstGeom prst="rect"><a:avLst/></a:prstGeom></xdr:spPr></xdr:pic><xdr:clientData/>';
+			o[o.length] = (writextag('xdr:twoCellAnchor', twoCell, images[i].attrs));
+		}
+	}
+
+	if(o.length>2){ o[o.length] = ('</xdr:wsDr>'); o[1]=o[1].replace("/>",">"); }
+	return o.join("");
+}
+
+// function write_zip(wb, opts) {
+// 	_shapeid = 1024;
+// 	if(opts.bookType == "ods") return write_ods(wb, opts);
+// 	if(wb && !wb.SSF) {
+// 		wb.SSF = SSF.get_table();
+// 	}
+// 	if(wb && wb.SSF) {
+// 		make_ssf(SSF); SSF.load_table(wb.SSF);
+// 		// $FlowIgnore
+// 		opts.revssf = evert_num(wb.SSF); opts.revssf[wb.SSF[65535]] = 0;
+// 		opts.ssf = wb.SSF;
+// 	}
+// 	opts.rels = {}; opts.wbrels = {};
+// 	opts.Strings = []; opts.Strings.Count = 0; opts.Strings.Unique = 0;
+// 	if(browser_has_Map) opts.revStrings = new Map();
+// 	else { opts.revStrings = {}; opts.revStrings.foo = []; delete opts.revStrings.foo; }
+// 	var wbext = opts.bookType == "xlsb" ? "bin" : "xml";
+// 	var vbafmt = VBAFMTS.indexOf(opts.bookType) > -1;
+// 	var ct = new_ct();
+// 	fix_write_opts(opts = opts || {});
+// var zip = zip_new();
+// 	var f = "", rId = 0;
+
+// 	opts.cellXfs = [];
+// 	get_cell_style(opts.cellXfs, {}, {revssf:{"General":0}});
+
+// 	if(!wb.Props) wb.Props = {};
+
+// 	f = "docProps/core.xml";
+// 	zip_add_file(zip, f, write_core_props(wb.Props, opts));
+// 	ct.coreprops.push(f);
+// 	add_rels(opts.rels, 2, f, RELS.CORE_PROPS);
+
+// f = "docProps/app.xml";
+// 	if(wb.Props && wb.Props.SheetNames){/* empty */}
+// 	else if(!wb.Workbook || !wb.Workbook.Sheets) wb.Props.SheetNames = wb.SheetNames;
+// 	else {
+// 		var _sn = [];
+// 		for(var _i = 0; _i < wb.SheetNames.length; ++_i)
+// 			if((wb.Workbook.Sheets[_i]||{}).Hidden != 2) _sn.push(wb.SheetNames[_i]);
+// 		wb.Props.SheetNames = _sn;
+// 	}
+// 	wb.Props.Worksheets = wb.Props.SheetNames.length;
+// 	zip_add_file(zip, f, write_ext_props(wb.Props, opts));
+// 	ct.extprops.push(f);
+// 	add_rels(opts.rels, 3, f, RELS.EXT_PROPS);
+
+// 	if(wb.Custprops !== wb.Props && keys(wb.Custprops||{}).length > 0) {
+// 		f = "docProps/custom.xml";
+// 		zip_add_file(zip, f, write_cust_props(wb.Custprops, opts));
+// 		ct.custprops.push(f);
+// 		add_rels(opts.rels, 4, f, RELS.CUST_PROPS);
+// 	}
+
+// 	// for(rId=1;rId <= wb.SheetNames.length; ++rId) {
+// 	// 	var wsrels = {'!id':{}};
+// 	// 	var ws = wb.Sheets[wb.SheetNames[rId-1]];
+// 	// 	var images = ws['!images'] || [];
+// 	// 	var _type = (ws || {})["!type"] || "sheet";
+// 	// 	switch(_type) {
+// 	// 	case "chart":
+// 	// 		/* falls through */
+// 	// 	default:
+// 	// 		f = "xl/worksheets/sheet" + rId + "." + wbext;
+// 	// 		zip_add_file(zip, f, write_ws(rId-1, f, opts, wb, wsrels));
+// 	// 		ct.sheets.push(f);
+// 	// 		add_rels(opts.wbrels, -1, "worksheets/sheet" + rId + "." + wbext, RELS.WS[0]);
+// 	// 	}
+// 	// }
+
+// 	for(rId=1;rId <= wb.SheetNames.length; ++rId) {
+// 		var s = wb.SheetNames[rId-1], ws = wb.Sheets[s],
+// 		    images = ws['!images'] || [];
+// 		var rels = ws['!rels'] = [], draw_rels = [];
+// 		for (var sId=1; sId < images.length+1; ++sId) {
+// 			var image = images[sId - 1];
+// 			f = 'xl/media/' + image.name;
+// 			zip.file(f, image.data, image.opts);
+// 			add_rels(draw_rels, sId, "../media/" + image.name, RELS.IMG);
+// 		}
+// 		zip.file("xl/drawings/drawing" + rId + "." + wbext, write_drawing(images));
+// 		add_rels(rels, rId, "../drawings/drawing" + rId + "." + wbext, RELS.DRAW);
+// 		zip.file("xl/drawings/_rels/drawing" + rId + "." + wbext + ".rels", write_rels(draw_rels));
+// 		zip.file("xl/worksheets/_rels/sheet" + rId + "." + wbext + '.rels', write_rels(rels));
+// 		f = "xl/worksheets/sheet" + rId + "." + wbext;
+// 		zip.file(f, write_ws(rId-1, f, opts, wb));
+// 		ct.sheets.push(f);
+// 		add_rels(opts.wbrels, rId, "worksheets/sheet" + rId + "." + wbext, RELS.WS);
+
+// 		if(ws) {
+// 			var comments = ws['!comments'];
+// 			var need_vml = false;
+// 			if(comments && comments.length > 0) {
+// 				var cf = "xl/comments" + rId + "." + wbext;
+// 				zip_add_file(zip, cf, write_cmnt(comments, cf, opts));
+// 				ct.comments.push(cf);
+// 				add_rels(rels, -1, "../comments" + rId + "." + wbext, RELS.CMNT);
+// 				need_vml = true;
+// 			}
+// 			if(ws['!legacy']) {
+// 				if(need_vml) zip_add_file(zip, "xl/drawings/vmlDrawing" + (rId) + ".vml", write_comments_vml(rId, ws['!comments']));
+// 			}
+// 			delete ws['!comments'];
+// 			delete ws['!legacy'];
+// 		}
+
+// 		if(rels['!id'].rId1) zip_add_file(zip, get_rels_path(f), write_rels(rels));
+// 	}
+
+// 	if(opts.Strings != null && opts.Strings.length > 0) {
+// 		f = "xl/sharedStrings." + wbext;
+// 		zip_add_file(zip, f, write_sst(opts.Strings, f, opts));
+// 		ct.strs.push(f);
+// 		add_rels(opts.wbrels, -1, "sharedStrings." + wbext, RELS.SST);
+// 	}
+
+// 	f = "xl/workbook." + wbext;
+// 	zip_add_file(zip, f, write_wb(wb, f, opts));
+// 	ct.workbooks.push(f);
+// 	add_rels(opts.rels, 1, f, RELS.WB);
+
+// 	/* TODO: something more intelligent with themes */
+
+// 	f = "xl/theme/theme1.xml";
+// 	zip_add_file(zip, f, write_theme(wb.Themes, opts));
+// 	ct.themes.push(f);
+// 	add_rels(opts.wbrels, -1, "theme/theme1.xml", RELS.THEME);
+
+// 	/* TODO: something more intelligent with styles */
+
+// 	f = "xl/styles." + wbext;
+// 	zip_add_file(zip, f, write_sty(wb, f, opts));
+// 	ct.styles.push(f);
+// 	add_rels(opts.wbrels, -1, "styles." + wbext, RELS.STY);
+
+// 	if(wb.vbaraw && vbafmt) {
+// 		f = "xl/vbaProject.bin";
+// 		zip_add_file(zip, f, wb.vbaraw);
+// 		ct.vba.push(f);
+// 		add_rels(opts.wbrels, -1, "vbaProject.bin", RELS.VBA);
+// 	}
+
+// 	zip_add_file(zip, "[Content_Types].xml", write_ct(ct, opts));
+// 	zip_add_file(zip, '_rels/.rels', write_rels(opts.rels));
+// 	zip_add_file(zip, 'xl/_rels/workbook.' + wbext + '.rels', write_rels(opts.wbrels));
+
+// 	delete opts.revssf; delete opts.ssf;
+// 	return zip;
+// }
 function firstbyte(f,o) {
 	var x = "";
 	switch((o||{}).type || "base64") {
